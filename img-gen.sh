@@ -1,22 +1,34 @@
 #!/usr/bin/env bash
+#
+# Copyright (C) 2026 AuxXxilium <https://github.com/AuxXxilium>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
 
 set -e
 
 # Clean cached Files
-sudo git clean -fdx
+sudo git clean -fdx 2>/dev/null || true
 
-. scripts/func.sh
+. scripts/functions.sh "${AUX_TOKEN}"
+
+# Unmount Image File
+sudo umount "/tmp/p1" 2>/dev/null || true
+sudo umount "/tmp/p3" 2>/dev/null || true
 
 # Get extractor, LKM, addons and Modules
-getLKMs "files/p3/lkms"
+echo "Get Dependencies"
+getBuildroot "apex"
 getAddons "files/p3/addons"
 getModules "files/p3/modules"
 getConfigs "files/p3/configs"
 getPatches "files/p3/patches"
+getCustom "files/p3/custom"
+getLKMs "files/p3/lkms"
 getTheme "files/p1/boot/grub"
-getOffline "files/p3/configs"
-getBuildroot "latest" "br"
 
+# Sbase
 IMAGE_FILE="arc.img"
 gzip -dc "files/initrd/opt/arc/grub.img.gz" >"${IMAGE_FILE}"
 fdisk -l "${IMAGE_FILE}"
@@ -32,35 +44,38 @@ mkdir -p "/tmp/p3"
 sudo mount ${LOOPX}p1 "/tmp/p1"
 sudo mount ${LOOPX}p3 "/tmp/p3"
 
-[[ ! -f "br/bzImage-arc" || ! -f "br/initrd-arc" ]] && return 1
-
-VERSION=$(date +'%y.%-m.dev')
-echo "${VERSION}" >files/p1/ARC-VERSION
-echo "${VERSION}" >VERSION
-sed 's/^ARC_VERSION=.*/ARC_VERSION="'${VERSION}'"/' -i files/initrd/opt/arc/include/consts.sh
-
-# read -rp "Build: ${VERSION}? Press ENTER to continue"
+ARC_BUILD="$(date +'%y%m%d')"
+ARC_VERSION="13.3.7"
+echo "${ARC_VERSION}" >"files/p1/ARC-VERSION"
+echo "${ARC_BUILD}" >"files/p1/ARC-BUILD"
 
 echo "Repack initrd"
-cp -f "br/bzImage-arc" "files/p3/bzImage-arc"
-repackInitrd "br/initrd-arc" "files/initrd" "files/p3/initrd-arc"
+for TYPE in "apex"; do
+  if [ -f "br/bzImage-${TYPE}" ] && [ -f "br/initrd-${TYPE}" ]; then
+      cp -f "br/bzImage-${TYPE}" "files/p3/bzImage-${TYPE}"
+      repackInitrd "br/initrd-${TYPE}" "files/initrd" "files/p3/initrd-${TYPE}"
+  else
+      exit 1
+  fi
+done
 
 echo "Copying files"
-sudo cp -Rf "files/p1/"* "/tmp/p1"
-sudo cp -Rf "files/p3/"* "/tmp/p3"
-sync
+sudo cp -rf "files/p1/"* "/tmp/p1"
+sudo cp -rf "files/p3/"* "/tmp/p3"
+sudo sync
 
 echo "Unmount image file"
 sudo umount "/tmp/p1"
 sudo umount "/tmp/p3"
-rmdir "/tmp/p1"
-rmdir "/tmp/p3"
+sudo rm -rf "/tmp/p1"
+sudo rm -rf "/tmp/p3"
 
 sudo losetup --detach ${LOOPX}
 
-#resizeImg "arc.img" "+1024M" "arc-2G.img"
-#mv -f "arc-2G.img" "arc.img"
+# echo "Resize Image File"
+# mv -f "${IMAGE_FILE}" "${IMAGE_FILE}.tmp"
+# resizeImg "${IMAGE_FILE}.tmp" "+1024M" "${IMAGE_FILE}"
+# rm -f "${IMAGE_FILE}.tmp"
 
-qemu-img convert arc.img -O vmdk -o adapter_type=lsilogic,compat6 arc-dyn.vmdk
-qemu-img convert arc.img -O vmdk -o adapter_type=lsilogic,subformat=monolithicFlat,compat6 arc.vmdk
-qemu-img convert arc.img -O vhdx -o subformat=dynamic arc.vhdx
+qemu-img convert -p -f raw -o subformat=monolithicFlat -O vmdk ${IMAGE_FILE} arc.vmdk
+echo "Build done at $(date +'%Y-%m-%d %H:%M:%S')"

@@ -1,196 +1,279 @@
 #!/usr/bin/env bash
+#
+# Copyright (C) 2026 AuxXxilium <https://github.com/AuxXxilium>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
 
+###############################################################################
+# Initialize environment
 [[ -z "${ARC_PATH}" || ! -d "${ARC_PATH}/include" ]] && ARC_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 
-. ${ARC_PATH}/include/functions.sh
-. ${ARC_PATH}/include/addons.sh
-. ${ARC_PATH}/include/modules.sh
+. "${ARC_PATH}/include/functions.sh"
+
+arc_mode
 
 set -o pipefail # Get exit code from process piped
-
-# Sanity check
-if [ ! -f "${ORI_RDGZ_FILE}" ]; then
-  echo "ERROR: ${ORI_RDGZ_FILE} not found!" >"${LOG_FILE}"
-  exit 1
-fi
-
-# Remove old rd.gz patched
-rm -f "${MOD_RDGZ_FILE}"
-
-# Unzipping ramdisk
-rm -rf "${RAMDISK_PATH}"
-mkdir -p "${RAMDISK_PATH}"
-(
-  cd "${RAMDISK_PATH}"
-  xz -dc <"${ORI_RDGZ_FILE}" | cpio -idm
-) >/dev/null 2>&1
 
 # Read Model Data
 PLATFORM="$(readConfigKey "platform" "${USER_CONFIG_FILE}")"
 MODEL="$(readConfigKey "model" "${USER_CONFIG_FILE}")"
-MODELID="$(readConfigKey "modelid" "${USER_CONFIG_FILE}")"
 LKM="$(readConfigKey "lkm" "${USER_CONFIG_FILE}")"
-SN="$(readConfigKey "sn" "${USER_CONFIG_FILE}")"
 LAYOUT="$(readConfigKey "layout" "${USER_CONFIG_FILE}")"
 KEYMAP="$(readConfigKey "keymap" "${USER_CONFIG_FILE}")"
-HDDSORT="$(readConfigKey "hddsort" "${USER_CONFIG_FILE}")"
-CPUGOVERNOR="$(readConfigKey "governor" "${USER_CONFIG_FILE}")"
 KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
 RD_COMPRESSED="$(readConfigKey "rd-compressed" "${USER_CONFIG_FILE}")"
 PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
+BUILDNUM="$(readConfigKey "buildnum" "${USER_CONFIG_FILE}")"
+SMALLNUM="$(readConfigKey "smallnum" "${USER_CONFIG_FILE}")"
+ODP="$(readConfigKey "odp" "${USER_CONFIG_FILE}")"
+DT="$(readConfigKey "dt" "${USER_CONFIG_FILE}")"
+ARC_BASE="$(cat "${PART1_PATH}/ARC-BASE" 2>/dev/null)"
+
+# Read kver data
+KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kver" "${P_FILE}")"
+KPRE="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kpre" "${P_FILE}")"
+
+# Sanity check
+if [ -z "${PLATFORM}" ] || [ -z "${KVER}" ]; then
+  echo "Error: Configuration for Model ${MODEL} and Version ${PRODUCTVER} not found." >"${LOG_FILE}"
+  exit 1
+fi
+
 # Read new PAT Info from Config
 PAT_URL="$(readConfigKey "paturl" "${USER_CONFIG_FILE}")"
 PAT_HASH="$(readConfigKey "pathash" "${USER_CONFIG_FILE}")"
 
-[ "${PATURL:0:1}" == "#" ] && PATURL=""
-[ "${PATSUM:0:1}" == "#" ] && PATSUM=""
-
-# Check if DSM Version changed
-. "${RAMDISK_PATH}/etc/VERSION"
-
-PRODUCTVERDSM="${majorversion}.${minorversion}"
-if [ "${PRODUCTVERDSM}" != "${PRODUCTVER}" ]; then
-  # Update new buildnumber
-  echo -e "Ramdisk Version ${PRODUCTVER} does not match DSM Version ${PRODUCTVERDSM}!"
-  echo -e "Try to use DSM Version ${PRODUCTVERDSM} for Patch."
-  writeConfigKey "productver" "${PRODUCTVERDSM}" "${USER_CONFIG_FILE}"
-  PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
-  PAT_URL=""
-  PAT_HASH=""
-fi
-
-# Read model data
-KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kver" "${P_FILE}")"
-
-# Modify KVER for Epyc7002
-if [ "${PLATFORM}" == "epyc7002" ]; then
-  KVERP="${PRODUCTVER}-${KVER}"
-else
-  KVERP="${KVER}"
-fi
+[ "${PAT_URL:0:1}" = "#" ] && PAT_URL=""
+[ "${PAT_HASH:0:1}" = "#" ] && PAT_HASH=""
 
 # Sanity check
-if [ -z "${PLATFORM}" ] || [ -z "${KVER}" ]; then
-  echo "ERROR: Configuration for model ${MODEL} and productversion ${PRODUCTVER} not found." >"${LOG_FILE}"
+if [ ! -f "${ORI_RDGZ_FILE}" ]; then
+  echo "Error: ${ORI_RDGZ_FILE} not found!"
   exit 1
 fi
 
-declare -A SYNOINFO
+# Unzipping ramdisk
+rm -rf "${RAMDISK_PATH}" # Force clean
+mkdir -p "${RAMDISK_PATH}"
+(cd "${RAMDISK_PATH}" && xz -dc <"${ORI_RDGZ_FILE}" | cpio -idm; exit "${PIPESTATUS[1]}") >"${LOG_FILE}" 2>&1
+if [ $? -ne 0 ] || [ ! -f "${RAMDISK_PATH}/etc/VERSION" ]; then
+  echo "Error: failed to unpack ${ORI_RDGZ_FILE}!" | tee -a "${LOG_FILE}"
+  exit 1
+fi
+
+# Check for DSM Version
+if [ ! -f "${RAMDISK_PATH}/etc/VERSION" ]; then
+  echo "Error: ${RAMDISK_PATH}/etc/VERSION not found after unpacking ramdisk!" | tee -a "${LOG_FILE}"
+  exit 1
+fi
+. "${RAMDISK_PATH}/etc/VERSION"
+if [ -z "${majorversion}" ] || [ -z "${minorversion}" ] || [ -z "${buildnumber}" ]; then
+  echo "Error: ${RAMDISK_PATH}/etc/VERSION is incomplete!" | tee -a "${LOG_FILE}"
+  exit 1
+fi
+
+if [ -f "${MOD_RDGZ_FILE}" ]; then
+  if [ -n "${PRODUCTVER}" ] && [ -n "${BUILDNUM}" ] && [ -n "${SMALLNUM}" ] && ([ "${PRODUCTVER}" != "${majorversion:-0}.${minorversion:-0}" ] || [ "${BUILDNUM}" != "${buildnumber:-0}" ] || [ "${SMALLNUM}" != "${smallfixnumber:-0}" ]); then
+    OLDVER="${PRODUCTVER}(${BUILDNUM}$([[ ${SMALLNUM:-0} -ne 0 ]] && echo "u${SMALLNUM}"))"
+    NEWVER="${majorversion}.${minorversion}(${buildnumber}$([[ ${smallfixnumber:-0} -ne 0 ]] && echo "u${smallfixnumber}"))"
+    PAT_URL_UPDATE="$(readConfigKey "${PLATFORM}.\"${MODEL}\".\"${major}.${minor}.${micro}-${buildnumber}-${smallfixnumber:-0}\".url" "${D_FILE}")"
+    [ -z "${PAT_URL_UPDATE}" ] && PAT_URL_UPDATE="#UPDATED"
+    PAT_HASH_UPDATE="$(readConfigKey "${PLATFORM}.\"${MODEL}\".\"${major}.${minor}.${micro}-${buildnumber}-${smallfixnumber:-0}\".hash" "${D_FILE}")"
+    [ -z "${PAT_HASH_UPDATE}" ] && PAT_HASH_UPDATE="#UPDATED"
+    echo -e ">> DSM Version changed from ${OLDVER} to ${NEWVER}"
+  fi
+fi
+
+# Update buildnumber
+PRODUCTVER="${major}.${minor}"
+DSMFULLVER="${major}.${minor}.${micro:-0}"
+BUILDNUM="${buildnumber}"
+SMALLNUM="${smallfixnumber}"
+writeConfigKey "productver" "${PRODUCTVER}" "${USER_CONFIG_FILE}"
+writeConfigKey "dsmfullver" "${DSMFULLVER}" "${USER_CONFIG_FILE}"
+writeConfigKey "buildnum" "${BUILDNUM}" "${USER_CONFIG_FILE}"
+writeConfigKey "smallnum" "${SMALLNUM}" "${USER_CONFIG_FILE}"
+
+# Re-read kver data for the actual DSM version found in the ramdisk
+# (KVER/KPRE above were derived from the previously stored productver,
+# which may be stale on a DSM version upgrade)
+KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kver" "${P_FILE}")"
+KPRE="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kpre" "${P_FILE}")"
+if [ -z "${KVER}" ]; then
+  echo "Error: Configuration for Model ${MODEL} and Version ${PRODUCTVER} not found." | tee -a "${LOG_FILE}"
+  exit 1
+fi
+
+# Read addons, modules and synoinfo
 declare -A ADDONS
 declare -A MODULES
+declare -A SYNOINFO
 
-# Read synoinfo and addons from config
-while IFS=': ' read -r KEY VALUE; do
-  [ -n "${KEY}" ] && SYNOINFO["${KEY}"]="${VALUE}"
-done < <(readConfigMap "synoinfo" "${USER_CONFIG_FILE}")
 while IFS=': ' read -r KEY VALUE; do
   [ -n "${KEY}" ] && ADDONS["${KEY}"]="${VALUE}"
-done < <(readConfigMap "addons" "${USER_CONFIG_FILE}")
+done <<<"$(readConfigMap "addons" "${USER_CONFIG_FILE}")"
 
-# Read modules from user config
 while IFS=': ' read -r KEY VALUE; do
   [ -n "${KEY}" ] && MODULES["${KEY}"]="${VALUE}"
-done < <(readConfigMap "modules" "${USER_CONFIG_FILE}")
+done <<<"$(readConfigMap "modules" "${USER_CONFIG_FILE}")"
+
+while IFS=': ' read -r KEY VALUE; do
+  [ -n "${KEY}" ] && SYNOINFO["${KEY}"]="${VALUE}"
+done <<<"$(readConfigMap "synoinfo" "${USER_CONFIG_FILE}")"
 
 # Patches (diff -Naru OLDFILE NEWFILE > xxx.patch)
-PATCHES=()
-PATCHES+=("ramdisk-etc-rc-*.patch")
-PATCHES+=("ramdisk-init-script-*.patch")
-PATCHES+=("ramdisk-post-init-script-*.patch")
-PATCHES+=("ramdisk-disable-root-pwd-*.patch")
-PATCHES+=("ramdisk-disable-disabled-ports-*.patch")
-for PE in ${PATCHES[@]}; do
+PATCHES=(
+  "ramdisk-etc-rc-*.patch"
+  "ramdisk-init-script-*.patch"
+  "ramdisk-post-init-script-*.patch"
+)
+
+for PE in "${PATCHES[@]}"; do
   RET=1
-  echo "Patching with ${PE}" >"${LOG_FILE}"
-  for PF in $(ls ${PATCH_PATH}/${PE} 2>/dev/null); do
-    echo "Patching with ${PF}" >>"${LOG_FILE}"
-    (
-      cd "${RAMDISK_PATH}"
-      busybox patch -p1 -i "${PF}" >>"${LOG_FILE}" 2>&1 # busybox patch and gun patch have different processing methods and parameters.
-    )
+  for PF in ${PATCH_PATH}/${PE}; do
+    [ ! -e "${PF}" ] && continue
+
+    # These patches are hand-authored diffs pinned to one specific DSM
+    # build's exact file content (see arc-patches/README), matched here only
+    # by filename glob, not by the ramdisk's actual buildnumber. busybox
+    # patch has no --dry-run, and applying a mismatched build's diff can
+    # still "succeed" via fuzzy context matching while inserting the hunk
+    # at the wrong location - corrupting scripts like /etc/rc or
+    # linuxrc.syno in a way that only surfaces as an unrelated-looking
+    # runtime failure much later in boot. Verify on a scratch copy of just
+    # the target file first, and only touch the real ramdisk if that
+    # verification copy patches cleanly.
+    PATCH_TARGET="$(sed -n '1{s/^--- a\///p}' "${PF}")"
+    if [ -z "${PATCH_TARGET}" ] || [ ! -f "${RAMDISK_PATH}/${PATCH_TARGET}" ]; then
+      echo "ERROR: cannot determine/find patch target for ${PF}" | tee -a "${LOG_FILE}"
+      exit 1
+    fi
+    VERIFY_DIR="$(mktemp -d)"
+    mkdir -p "${VERIFY_DIR}/$(dirname "${PATCH_TARGET}")"
+    cp -f "${RAMDISK_PATH}/${PATCH_TARGET}" "${VERIFY_DIR}/${PATCH_TARGET}"
+    (cd "${VERIFY_DIR}" && busybox patch -p1 -i "${PF}") >>"${LOG_FILE}" 2>&1
+    RET=$?
+    rm -rf "${VERIFY_DIR}"
+    if [ ${RET} -ne 0 ]; then
+      echo "WARNING: ${PF} does not apply cleanly against ${PATCH_TARGET} (build ${BUILDNUM}), skipping" >>"${LOG_FILE}"
+      continue
+    fi
+
+    (cd "${RAMDISK_PATH}" && busybox patch -p1 -i "${PF}") >>"${LOG_FILE}" 2>&1
     RET=$?
     [ ${RET} -eq 0 ] && break
   done
   [ ${RET} -ne 0 ] && exit 1
 done
 
-# Patch /etc/synoinfo.conf
-# Add serial number to synoinfo.conf, to help to recovery a installed DSM
-echo "Set synoinfo SN" >"${LOG_FILE}"
-_set_conf_kv "SN" "${SN}" "${RAMDISK_PATH}/etc/synoinfo.conf" >>"${LOG_FILE}" 2>&1 || exit 1
-for KEY in ${!SYNOINFO[@]}; do
-  echo "Set synoinfo ${KEY}" >>"${LOG_FILE}"
-  _set_conf_kv "${KEY}" "${SYNOINFO[${KEY}]}" "${RAMDISK_PATH}/etc/synoinfo.conf" >>"${LOG_FILE}" 2>&1 || exit 1
-done
+# Kernel patches
+[ "${ARC_MODE}" != "dsm" ] && echo -e ">> Ramdisk: apply Linux ${KVER:0:1}.x fixes"
+if [ "${KVER:0:1}" -eq 5 ]; then
+  sed -i 's#/dev/console#/var/log/lrc#g' "${RAMDISK_PATH}/usr/bin/busybox"
+  sed -i '/^echo "START/a \\nmknod -m 0666 /dev/console c 1 3' "${RAMDISK_PATH}/linuxrc.syno"
+else
+  cp -f "${PATCH_PATH}/iosched-trampoline.sh" "${RAMDISK_PATH}/usr/sbin/modprobe"
+fi
 
-# Patch /sbin/init.post
-grep -v -e '^[\t ]*#' -e '^$' "${PATCH_PATH}/config-manipulators.sh" >"${TMP_PATH}/rp.txt"
-sed -e "/@@@CONFIG-MANIPULATORS-TOOLS@@@/ {" -e "r ${TMP_PATH}/rp.txt" -e 'd' -e '}' -i "${RAMDISK_PATH}/sbin/init.post"
-rm -f "${TMP_PATH}/rp.txt"
-touch "${TMP_PATH}/rp.txt"
-for KEY in ${!SYNOINFO[@]}; do
-  echo "_set_conf_kv '${KEY}' '${SYNOINFO[${KEY}]}' '/tmpRoot/etc/synoinfo.conf'" >>"${TMP_PATH}/rp.txt"
-  echo "_set_conf_kv '${KEY}' '${SYNOINFO[${KEY}]}' '/tmpRoot/etc.defaults/synoinfo.conf'" >>"${TMP_PATH}/rp.txt"
-done
-echo "_set_conf_kv 'SN' '${SN}' '/tmpRoot/etc/synoinfo.conf'" >>"${TMP_PATH}/rp.txt"
-echo "_set_conf_kv 'SN' '${SN}' '/tmpRoot/etc.defaults/synoinfo.conf'" >>"${TMP_PATH}/rp.txt"
-sed -e "/@@@CONFIG-GENERATED@@@/ {" -e "r ${TMP_PATH}/rp.txt" -e 'd' -e '}' -i "${RAMDISK_PATH}/sbin/init.post"
-rm -f "${TMP_PATH}/rp.txt"
+# Broadwellntbap patches
+[ "${ARC_MODE}" != "dsm" ] && echo -e ">> Ramdisk: apply ${PLATFORM} fixes"
+if [ "${PLATFORM}" = "broadwellntbap" ]; then
+  sed -i 's/IsUCOrXA="yes"/XIsUCOrXA="yes"/g; s/IsUCOrXA=yes/XIsUCOrXA=yes/g' "${RAMDISK_PATH}/usr/syno/share/environments.sh"
+fi
 
-# Extract Modules to Ramdisk
-installModules "${PLATFORM}" "${KVERP}" "${!MODULES[@]}" || exit 1
-
-# Copying fake modprobe
-cp -f "${PATCH_PATH}/iosched-trampoline.sh" "${RAMDISK_PATH}/usr/sbin/modprobe"
-# Copying LKM to /usr/lib/modules
-gzip -dc "${LKMS_PATH}/rp-${PLATFORM}-${KVERP}-${LKM}.ko.gz" >"${RAMDISK_PATH}/usr/lib/modules/rp.ko" 2>"${LOG_FILE}" || exit 1
+# DSM 7.3
+[ "${ARC_MODE}" != "dsm" ] && echo -e ">> Ramdisk: apply DSM ${PRODUCTVER:0:3} fixes"
+if [[ "${PRODUCTVER}" > "7.2" ]]; then
+  sed -i 's#/usr/syno/sbin/broadcom_update.sh#/usr/syno/sbin/broadcom_update.sh.arc#g' "${RAMDISK_PATH}/linuxrc.syno.impl"
+fi
 
 # Addons
-echo "Create addons.sh" >"${LOG_FILE}"
 mkdir -p "${RAMDISK_PATH}/addons"
-echo "#!/bin/sh" >"${RAMDISK_PATH}/addons/addons.sh"
-echo 'echo "addons.sh called with params ${@}"' >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export LOADERLABEL=\"ARC\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export LOADERVERSION=\"${ARC_VERSION}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export PLATFORM=\"${PLATFORM}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export PRODUCTVERL=\"${PRODUCTVER}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export MODEL=\"${MODEL}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export MODELID=\"${MODELID}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export MLINK=\"${PAT_URL}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export MCHECKSUM=\"${PAT_HASH}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export LAYOUT=\"${LAYOUT}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
-echo "export KEYMAP=\"${KEYMAP}\"" >>"${RAMDISK_PATH}/addons/addons.sh"
+echo "Create addons.sh" >>"${LOG_FILE}"
+{
+  echo "#!/bin/sh"
+  echo 'echo "addons.sh called with params ${@}"'
+  echo "export LLABEL=\"ARC\""
+  echo "export LVERSION=\"${ARC_VERSION}\""
+  echo "export LBUILD=\"${ARC_BUILD}\""
+  echo "export PLATFORM=\"${PLATFORM}\""
+  echo "export MODEL=\"${MODEL}\""
+  echo "export PRODUCTVER=\"${PRODUCTVER}\""
+  echo "export MLINK=\"${PAT_URL}\""
+  echo "export MCHECKSUM=\"${PAT_HASH}\""
+  echo "export LAYOUT=\"${LAYOUT:-qwerty}\""
+  echo "export KEYMAP=\"${KEYMAP:-en}\""
+} >"${RAMDISK_PATH}/addons/addons.sh"
 chmod +x "${RAMDISK_PATH}/addons/addons.sh"
 
 # System Addons
-for ADDON in "redpill" "revert" "misc" "eudev" "disks" "localrss" "notify" "updatenotify" "wol" "mountloader" "powersched" "cpufreqscaling"; do
-  PARAMS=""
-  if [ "${ADDON}" == "disks" ]; then
-    PARAMS=${HDDSORT:-"false"}
+[ "${ARC_MODE}" != "dsm" ] && echo -e ">> Ramdisk: install addons"
+NETFIX="$(readConfigKey "arc.netfix" "${USER_CONFIG_FILE}")"
+if [ "${NETFIX}" = "force" ]; then
+  SYSADDONS="revert misc eudev disks netfix localrss notify mountloader"
+else
+  SYSADDONS="revert misc eudev disks localrss notify mountloader"
+fi
+if [ "${KVER:0:1}" = "5" ]; then
+  SYSADDONS="redpill ${SYSADDONS}"
+fi
+
+for ADDON in ${SYSADDONS}; do
+  if [ "${ADDON}" = "disks" ]; then
+    [ -f "${USER_UP_PATH}/model.dts" ] && cp -f "${USER_UP_PATH}/model.dts" "${RAMDISK_PATH}/addons/model.dts"
     [ -f "${USER_UP_PATH}/${MODEL}.dts" ] && cp -f "${USER_UP_PATH}/${MODEL}.dts" "${RAMDISK_PATH}/addons/model.dts"
-  elif [ "${ADDON}" == "cpufreqscaling" ]; then
-    PARAMS=${CPUGOVERNOR:-"performance"}
   fi
-  installAddon "${ADDON}" "${PLATFORM}" || exit 1
-  echo "/addons/${ADDON}.sh \${1} ${PARAMS}" >>"${RAMDISK_PATH}/addons/addons.sh" 2>>"${LOG_FILE}" || exit 1
+  if ! isAddonAvailable "${ADDON}" "${PLATFORM}"; then
+    echo "ERROR: System addon ${ADDON} not available for ${PLATFORM}" | tee -a "${LOG_FILE}"
+    exit 1
+  fi
+  if installAddon "${ADDON}" "${PLATFORM}" "${PRODUCTVER}" "${KVER}"; then
+    if [ ! -f "${RAMDISK_PATH}/addons/${ADDON}.sh" ]; then
+      echo "ERROR: System addon ${ADDON} install.sh missing after install" | tee -a "${LOG_FILE}"
+      exit 1
+    fi
+    echo "/addons/${ADDON}.sh \${1}" >>"${RAMDISK_PATH}/addons/addons.sh" 2>>"${LOG_FILE}" || { echo "ERROR: Addon ${ADDON} failed to register" | tee -a "${LOG_FILE}" && exit 1; }
+  else
+    echo "ERROR: System addon ${ADDON} failed to install" | tee -a "${LOG_FILE}"
+    exit 1
+  fi
 done
 
 # User Addons
-for ADDON in ${!ADDONS[@]}; do
-  PARAMS=${ADDONS[${ADDON}]}
-  installAddon "${ADDON}" "${PLATFORM}" || exit 1
-  echo "/addons/${ADDON}.sh \${1} ${PARAMS}" >>"${RAMDISK_PATH}/addons/addons.sh" 2>>"${LOG_FILE}" || exit 1
+for ADDON in "${!ADDONS[@]}"; do
+  PARAMS=""
+  if [ "${ADDON}" = "notification" ]; then
+    WEBHOOKNOTIFY="$(readConfigKey "arc.webhooknotify" "${USER_CONFIG_FILE}")"
+    [ "${WEBHOOKNOTIFY}" = "true" ] && WEBHOOK="$(readConfigKey "arc.webhook" "${USER_CONFIG_FILE}")"
+    DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
+    [ "${DISCORDNOTIFY}" = "true" ] && DISCORDUSERID="$(readConfigKey "arc.userid" "${USER_CONFIG_FILE}")"
+    PARAMS="${WEBHOOK:-false} ${DISCORDUSERID:-false}"
+  fi
+  if ! isAddonAvailable "${ADDON}" "${PLATFORM}"; then
+    echo "WARNING: User addon ${ADDON} not available for ${PLATFORM}, skipping" | tee -a "${LOG_FILE}"
+    continue
+  fi
+  if installAddon "${ADDON}" "${PLATFORM}" "${PRODUCTVER}" "${KVER}"; then
+    if [ ! -f "${RAMDISK_PATH}/addons/${ADDON}.sh" ]; then
+      echo "WARNING: User addon ${ADDON} has no install.sh, skipping" | tee -a "${LOG_FILE}"
+      continue
+    fi
+    echo "/addons/${ADDON}.sh \${1} ${PARAMS}" >>"${RAMDISK_PATH}/addons/addons.sh" 2>>"${LOG_FILE}" || { echo "ERROR: Addon ${ADDON} failed to register" | tee -a "${LOG_FILE}" && exit 1; }
+  else
+    echo "WARNING: User addon ${ADDON} failed to install, skipping" | tee -a "${LOG_FILE}"
+  fi
 done
 
-# Enable Telnet
-echo "inetd" >>"${RAMDISK_PATH}/addons/addons.sh"
+# Extract modules to ramdisk
+[ "${ARC_MODE}" != "dsm" ] && echo -e ">> Ramdisk: install modules"
+installModules "${PLATFORM}" "${KPRE:+${KPRE}-}${KVER}" "${!MODULES[@]}" || exit 1
+if ! gzip -dc "${LKMS_PATH}/rp-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-${LKM}.ko.gz" >"${RAMDISK_PATH}/usr/lib/modules/redpill.ko" 2>>"${LOG_FILE}"; then
+  echo "ERROR: redpill LKM not found: rp-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-${LKM}.ko.gz" | tee -a "${LOG_FILE}"
+  exit 1
+fi
 
-echo "Modify files" >"${LOG_FILE}"
-# Remove function from scripts
-[ "2" == "${BUILDNUM:0:1}" ] && sed -i 's/function //g' $(find "${RAMDISK_PATH}/addons/" -type f -name "*.sh")
-
-# Build modules dependencies
-# ${ARC_PATH}/depmod -a -b ${RAMDISK_PATH} 2>/dev/null
 
 # Copying modulelist
 if [ -f "${USER_UP_PATH}/modulelist" ]; then
@@ -199,55 +282,71 @@ else
   cp -f "${ARC_PATH}/include/modulelist" "${RAMDISK_PATH}/addons/modulelist"
 fi
 
+# Patch synoinfo.conf
+echo -n "" >"${RAMDISK_PATH}/addons/synoinfo.conf"
+for KEY in "${!SYNOINFO[@]}"; do
+  echo "Set synoinfo ${KEY}" >>"${LOG_FILE}"
+  echo "${KEY}=\"${SYNOINFO[${KEY}]}\"" >>"${RAMDISK_PATH}/addons/synoinfo.conf"
+  _set_conf_kv "${RAMDISK_PATH}/etc/synoinfo.conf" "${KEY}" "${SYNOINFO[${KEY}]}" || exit 1
+  _set_conf_kv "${RAMDISK_PATH}/etc.defaults/synoinfo.conf" "${KEY}" "${SYNOINFO[${KEY}]}" || exit 1
+done
+if [ ! -x "${RAMDISK_PATH}/usr/bin/get_key_value" ]; then
+  rm -rf "${RAMDISK_PATH}/usr/bin/get_key_value"
+  printf '#!/bin/sh\n%s\n_get_conf_kv "$@"' "$(declare -f _get_conf_kv)" >"${RAMDISK_PATH}/usr/bin/get_key_value"
+  chmod a+x "${RAMDISK_PATH}/usr/bin/get_key_value"
+fi
+if [ ! -x "${RAMDISK_PATH}/usr/bin/set_key_value" ]; then
+  rm -rf "${RAMDISK_PATH}/usr/bin/set_key_value"
+  printf '#!/bin/sh\n%s\n_set_conf_kv "$@"' "$(declare -f _set_conf_kv)" >"${RAMDISK_PATH}/usr/bin/set_key_value"
+  chmod a+x "${RAMDISK_PATH}/usr/bin/set_key_value"
+fi
+
 # backup current loader configs
+mkdir -p "${RAMDISK_PATH}/usr/arc"
+{
+  echo "LLABEL=\"ARC\""
+  echo "LVERSION=\"${ARC_VERSION}\""
+  echo "LBUILD=\"${ARC_BUILD}\""
+  echo "LACCESSTOKEN=\"$(genAccessToken)\""
+} >"${RAMDISK_PATH}/usr/arc/VERSION"
 BACKUP_PATH="${RAMDISK_PATH}/usr/arc/backup"
 rm -rf "${BACKUP_PATH}"
-for F in "${USER_GRUB_CONFIG}" "${USER_CONFIG_FILE}" "${USER_UP_PATH}"; do
-  if [ -f "${F}" ]; then
-    FD="$(dirname "${F}")"
-    mkdir -p "${FD/\/mnt/${BACKUP_PATH}}"
-    cp -f "${F}" "${FD/\/mnt/${BACKUP_PATH}}"
-  elif [ -d "${F}" ]; then
-    SIZE="$(du -sm "${F}" 2>/dev/null | awk '{print $1}')"
-    if [ ${SIZE:-0} -gt 4 ]; then
-      echo "Backup of ${F} skipped, size is ${SIZE}MB" >>"${LOG_FILE}"
-      continue
-    fi
-    FD="$(dirname "${F}")"
-    mkdir -p "${FD/\/mnt/${BACKUP_PATH}}"
-    cp -rf "${F}" "${FD/\/mnt/${BACKUP_PATH}}"
+if [ -f "${USER_GRUB_CONFIG}" ] && [ -f "${USER_CONFIG_FILE}" ] && [ -f "${ORI_ZIMAGE_FILE}" ] && [ -f "${ORI_RDGZ_FILE}" ]; then
+  if [ -d "${PART1_PATH}" ]; then
+    mkdir -p "${BACKUP_PATH}/p1"
+    cp -rf "${PART1_PATH}/." "${BACKUP_PATH}/p1/"
+    rm -f "${BACKUP_PATH}/p1/ARC-VERSION" "${BACKUP_PATH}/p1/ARC-BUILD"
+    rm -f "${BACKUP_PATH}/p1/boot/grub/grub.cfg"
   fi
-done
+  if [ -d "${PART2_PATH}" ]; then
+    mkdir -p "${BACKUP_PATH}/p2"
+    cp -rf "${PART2_PATH}/." "${BACKUP_PATH}/p2/"
+  fi
+fi
 
 # Network card configuration file
 for N in $(seq 0 7); do
-  echo -e "DEVICE=eth${N}\nBOOTPROTO=dhcp\nONBOOT=yes\nIPV6INIT=dhcp\nIPV6_ACCEPT_RA=1" >"${RAMDISK_PATH}/etc/sysconfig/network-scripts/ifcfg-eth${N}"
-done
-
-# SA6400 patches
-if [ "${PLATFORM}" == "epyc7002" ]; then
-  echo -n " - Apply Epyc7002 Fixes"
-  sed -i 's#/dev/console#/var/log/lrc#g' ${RAMDISK_PATH}/usr/bin/busybox
-  sed -i '/^echo "START/a \\nmknod -m 0666 /dev/console c 1 3' ${RAMDISK_PATH}/linuxrc.syno
-fi
-
-# Broadwellntbap patches
-if [ "${PLATFORM}" == "broadwellntbap" ]; then
-  echo -n " - Apply Broadwellntbap Fixes"
-  sed -i 's/IsUCOrXA="yes"/XIsUCOrXA="yes"/g; s/IsUCOrXA=yes/XIsUCOrXA=yes/g' ${RAMDISK_PATH}/usr/syno/share/environments.sh
-fi
-
-# Call user patch scripts
-for F in $(ls -1 ${USER_UP_PATH}/*.sh 2>/dev/null); do
-  echo "Calling ${F}" >"${LOG_FILE}"
-  . "${F}" >>"${LOG_FILE}" 2>&1 || exit 1
+  echo -e "DEVICE=eth${N}\nBOOTPROTO=dhcp\nONBOOT=yes\nIPV6INIT=no\nIPV6_ACCEPT_RA=0" >"${RAMDISK_PATH}/etc/sysconfig/network-scripts/ifcfg-eth${N}"
 done
 
 # Reassembly ramdisk
-if [ "${RD_COMPRESSED}" == "true" ]; then
+rm -f "${MOD_RDGZ_FILE}"
+if [ "${RD_COMPRESSED}" = "true" ]; then
   (cd "${RAMDISK_PATH}" && find . 2>/dev/null | cpio -o -H newc -R root:root | xz -9 --format=lzma >"${MOD_RDGZ_FILE}") >"${LOG_FILE}" 2>&1 || exit 1
 else
   (cd "${RAMDISK_PATH}" && find . 2>/dev/null | cpio -o -H newc -R root:root >"${MOD_RDGZ_FILE}") >"${LOG_FILE}" 2>&1 || exit 1
+fi
+
+# Sanity check: reassembled ramdisk must exist and be reasonably sized
+if [ ! -s "${MOD_RDGZ_FILE}" ]; then
+  echo "Error: ${MOD_RDGZ_FILE} was not created!" | tee -a "${LOG_FILE}"
+  exit 1
+fi
+MOD_RDGZ_SIZE="$(stat -c%s "${MOD_RDGZ_FILE}" 2>/dev/null || echo 0)"
+ORI_RDGZ_SIZE="$(stat -c%s "${ORI_RDGZ_FILE}" 2>/dev/null || echo 0)"
+if [ "${MOD_RDGZ_SIZE}" -lt $((ORI_RDGZ_SIZE / 2)) ]; then
+  echo "Error: ${MOD_RDGZ_FILE} looks truncated (${MOD_RDGZ_SIZE} bytes vs original ${ORI_RDGZ_SIZE} bytes)!" | tee -a "${LOG_FILE}"
+  exit 1
 fi
 
 sync

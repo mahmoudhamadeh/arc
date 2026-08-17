@@ -1,56 +1,93 @@
 #!/usr/bin/env bash
+#
+# Copyright (C) 2026 AuxXxilium <https://github.com/AuxXxilium>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
 
-set -e
+###############################################################################
+# Initialize environment
 [[ -z "${ARC_PATH}" || ! -d "${ARC_PATH}/include" ]] && ARC_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 
-. ${ARC_PATH}/include/functions.sh
-. ${ARC_PATH}/include/addons.sh
-. ${ARC_PATH}/include/compat.sh
-. ${ARC_PATH}/boot.sh
+. "${ARC_PATH}/include/functions.sh"
+
+# VMware time sync
+if type vmware-toolbox-cmd >/dev/null 2>&1; then
+  if [ "Disabled" = "$(vmware-toolbox-cmd timesync status 2>/dev/null)" ]; then
+    vmware-toolbox-cmd timesync enable >/dev/null 2>&1 || true
+  fi
+  if [ "Enabled" = "$(vmware-toolbox-cmd timesync status 2>/dev/null)" ]; then
+    vmware-toolbox-cmd timesync disable >/dev/null 2>&1 || true
+  fi
+fi
 
 # Get Loader Disk Bus
 [ -z "${LOADER_DISK}" ] && die "Loader Disk not found!"
-BUS=$(getBus "${LOADER_DISK}")
+checkBootLoader || die "The loader is corrupted, please rewrite it!"
+arc_mode || die "No bootmode found!"
 
-# Check if machine has EFI
-[ -d /sys/firmware/efi ] && EFI=1 || EFI=0
+if [ -f "${USER_CONFIG_FILE}" ]; then
+  case "$(readConfigKey "kernel" "${USER_CONFIG_FILE}")" in
+  custom | full) writeConfigKey "kernel" "legacy" "${USER_CONFIG_FILE}" ;;
+  esac
+fi
+
+[ -f "${HOME}/.initialized" ] && arc.sh && exit 0 || true
+
+BUS=$(getBus "${LOADER_DISK}")
+EFI=$([ -d /sys/firmware/efi ] && echo 1 || echo 0)
 
 # Print Title centralized
 clear
-COLUMNS=${COLUMNS:-50}
-BANNER="$(figlet -c -w "$(((${COLUMNS})))" "Arc Loader")"
+COLUMNS=$(ttysize 2>/dev/null | awk '{print $1}')
+COLUMNS=${COLUMNS:-120}
+BANNER="$(figlet -c -w "${COLUMNS}" "Arc Loader")"
 TITLE="Version:"
-TITLE+=" ${ARC_TITLE}"
-printf "\033[1;30m%*s\n" ${COLUMNS} ""
-printf "\033[1;30m%*s\033[A\n" ${COLUMNS} ""
-printf "\033[1;34m%*s\033[0m\n" ${COLUMNS} "${BANNER}"
-printf "\033[1;34m%*s\033[0m\n" $(((${#TITLE} + ${COLUMNS}) / 2)) "${TITLE}"
+TITLE+=" ${ARC_VERSION} (${ARC_BUILD})"
+echo -e "\033[1;30m$(printf '%*s' ${COLUMNS} '')\033[0m"
+echo -e "\033[1;30m$(printf '%*s' ${COLUMNS} '')\033[A\033[0m"
+echo -e "\033[1;34m${BANNER}\033[0m"
+echo -e "\033[1;37m$(printf '%*s' $(((${#TITLE} + ${COLUMNS}) / 2)) "${TITLE}")\033[0m"
 TITLE="Boot:"
-[ ${EFI} -eq 1 ] && TITLE+=" [UEFI]" || TITLE+=" [BIOS]"
-TITLE+=" [${BUS}]"
-printf "\033[1;34m%*s\033[0m\n" $(((${#TITLE} + ${COLUMNS}) / 2)) "${TITLE}"
+[ "${EFI}" = "1" ] && TITLE+=" UEFI" || TITLE+=" BIOS"
+TITLE+=" | Device: ${BUS} | Mode: ${ARC_MODE}"
+echo -e "\033[1;37m$(printf '%*s' $(((${#TITLE} + ${COLUMNS}) / 2)) "${TITLE}")\033[0m"
 
 # Check for Config File
 if [ ! -f "${USER_CONFIG_FILE}" ]; then
   touch "${USER_CONFIG_FILE}"
 fi
-# Config Init
 initConfigKey "addons" "{}" "${USER_CONFIG_FILE}"
 initConfigKey "arc" "{}" "${USER_CONFIG_FILE}"
+initConfigKey "arc.backup" "false" "${USER_CONFIG_FILE}"
 initConfigKey "arc.builddone" "false" "${USER_CONFIG_FILE}"
 initConfigKey "arc.confdone" "false" "${USER_CONFIG_FILE}"
-initConfigKey "arc.ipv6" "false" "${USER_CONFIG_FILE}"
-initConfigKey "arc.key" "" "${USER_CONFIG_FILE}"
-initConfigKey "arc.nic" "" "${USER_CONFIG_FILE}"
+initConfigKey "arc.consoleblank" "600" "${USER_CONFIG_FILE}"
+initConfigKey "arc.dev" "false" "${USER_CONFIG_FILE}"
+initConfigKey "arc.discordnotify" "false" "${USER_CONFIG_FILE}"
+initConfigKey "arc.accesstoken" "" "${USER_CONFIG_FILE}"
 initConfigKey "arc.offline" "false" "${USER_CONFIG_FILE}"
+initConfigKey "arc.netfix" "false" "${USER_CONFIG_FILE}"
 initConfigKey "arc.patch" "false" "${USER_CONFIG_FILE}"
+initConfigKey "arc.remoteassistance" "" "${USER_CONFIG_FILE}"
+initConfigKey "arc.userid" "" "${USER_CONFIG_FILE}"
 initConfigKey "arc.version" "${ARC_VERSION}" "${USER_CONFIG_FILE}"
-initConfigKey "bootipwait" "30" "${USER_CONFIG_FILE}"
+initConfigKey "arc.webhooknotify" "false" "${USER_CONFIG_FILE}"
+initConfigKey "arc.webhookurl" "" "${USER_CONFIG_FILE}"
+initConfigKey "bootscreen" "{}" "${USER_CONFIG_FILE}"
+initConfigKey "bootscreen.dsminfo" "true" "${USER_CONFIG_FILE}"
+initConfigKey "bootscreen.systeminfo" "true" "${USER_CONFIG_FILE}"
+initConfigKey "bootscreen.diskinfo" "false" "${USER_CONFIG_FILE}"
+initConfigKey "bootscreen.accesstokeninfo" "false" "${USER_CONFIG_FILE}"
+initConfigKey "bootscreen.dsmlogo" "true" "${USER_CONFIG_FILE}"
+initConfigKey "bootipwait" "20" "${USER_CONFIG_FILE}"
+initConfigKey "device" "{}" "${USER_CONFIG_FILE}"
 initConfigKey "directboot" "false" "${USER_CONFIG_FILE}"
-initConfigKey "dsmlogo" "true" "${USER_CONFIG_FILE}"
+initConfigKey "dsmfullver" "" "${USER_CONFIG_FILE}"
 initConfigKey "emmcboot" "false" "${USER_CONFIG_FILE}"
+initConfigKey "fancontrol" "false" "${USER_CONFIG_FILE}"
 initConfigKey "governor" "performance" "${USER_CONFIG_FILE}"
-initConfigKey "hddsort" "false" "${USER_CONFIG_FILE}"
 initConfigKey "kernel" "official" "${USER_CONFIG_FILE}"
 initConfigKey "kernelload" "power" "${USER_CONFIG_FILE}"
 initConfigKey "kernelpanic" "5" "${USER_CONFIG_FILE}"
@@ -59,180 +96,199 @@ initConfigKey "pathash" "" "${USER_CONFIG_FILE}"
 initConfigKey "paturl" "" "${USER_CONFIG_FILE}"
 initConfigKey "sn" "" "${USER_CONFIG_FILE}"
 initConfigKey "cmdline" "{}" "${USER_CONFIG_FILE}"
-initConfigKey "device" "{}" "${USER_CONFIG_FILE}"
-initConfigKey "device.externalcontroller" "false" "${USER_CONFIG_FILE}"
 initConfigKey "keymap" "" "${USER_CONFIG_FILE}"
 initConfigKey "layout" "" "${USER_CONFIG_FILE}"
 initConfigKey "lkm" "prod" "${USER_CONFIG_FILE}"
 initConfigKey "modblacklist" "evbug,cdc_ether" "${USER_CONFIG_FILE}"
 initConfigKey "modules" "{}" "${USER_CONFIG_FILE}"
 initConfigKey "model" "" "${USER_CONFIG_FILE}"
-initConfigKey "modelid" "" "${USER_CONFIG_FILE}"
 initConfigKey "network" "{}" "${USER_CONFIG_FILE}"
 initConfigKey "platform" "" "${USER_CONFIG_FILE}"
 initConfigKey "productver" "" "${USER_CONFIG_FILE}"
+initConfigKey "buildnum" "" "${USER_CONFIG_FILE}"
+initConfigKey "smallnum" "" "${USER_CONFIG_FILE}"
 initConfigKey "ramdisk-hash" "" "${USER_CONFIG_FILE}"
 initConfigKey "rd-compressed" "false" "${USER_CONFIG_FILE}"
 initConfigKey "satadom" "2" "${USER_CONFIG_FILE}"
 initConfigKey "synoinfo" "{}" "${USER_CONFIG_FILE}"
 initConfigKey "time" "{}" "${USER_CONFIG_FILE}"
+initConfigKey "usbmount" "false" "${USER_CONFIG_FILE}"
 initConfigKey "zimage-hash" "" "${USER_CONFIG_FILE}"
-if grep -q "automated_arc" /proc/cmdline; then
-  writeConfigKey "automated" "true" "${USER_CONFIG_FILE}"
-else
-  writeConfigKey "automated" "false" "${USER_CONFIG_FILE}"
-fi
-[ -f "${PART3_PATH}/automated" ] && rm -f "${PART3_PATH}/automated" >/dev/null
-# Check for compatibility
-compatboot
 
-# Init Network
-ETHX="$(ls /sys/class/net/ 2>/dev/null | grep eth)"
-if arrayExistItem "sortnetif:" $(readConfigMap "addons" "${USER_CONFIG_FILE}"); then
-  _sort_netif "$(readConfigKey "addons.sortnetif" "${USER_CONFIG_FILE}")"
+# Sort network interfaces
+if [ ! -f "/.dockerenv" ]; then
+  if arrayExistItem "sortnetif:" $(readConfigMap "addons" "${USER_CONFIG_FILE}"); then
+    echo -e "NIC sorting: \033[1;34menabled\033[0m"
+    _sort_netif "$(readConfigKey "addons.sortnetif" "${USER_CONFIG_FILE}")"
+    echo
+  fi
 fi
-[ ! -f /var/run/dhcpcd/pid ] && /etc/init.d/S41dhcpcd restart >/dev/null 2>&1 || true
-# Read/Write IP/Mac config
-for ETH in ${ETHX}; do
-  MACR="$(cat /sys/class/net/${ETH}/address 2>/dev/null | sed 's/://g' | tr '[:upper:]' '[:lower:]')"
+
+# Read/Write IP/Mac to config
+ETHX="$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -name 'eth*' -exec basename {} \; | sort -V)"
+ETHN=0
+for N in ${ETHX}; do
+  MACR="$(cat /sys/class/net/${N}/address 2>/dev/null | sed 's/://g' | tr '[:upper:]' '[:lower:]')"
   IPR="$(readConfigKey "network.${MACR}" "${USER_CONFIG_FILE}")"
   if [ -n "${IPR}" ]; then
-    IFS='/' read -r -a IPRA <<<"$IPR"
-    ip addr flush dev $ETH
-    ip addr add ${IPRA[0]}/${IPRA[1]:-"255.255.255.0"} dev $ETH
+    if [ ! "1" = "$(cat /sys/class/net/${N}/carrier 2>/dev/null)" ]; then
+      ip link set "${N}" up 2>/dev/null || true
+    fi
+    IFS='/' read -r -a IPRA <<<"${IPR}"
+    ip addr flush dev "${N}" 2>/dev/null || true
+    ip addr add "${IPRA[0]}/${IPRA[1]:-"255.255.255.0"}" dev "${N}" 2>/dev/null || true
     if [ -n "${IPRA[2]}" ]; then
-      ip route add default via ${IPRA[2]} dev $ETH
+      ip route add default via "${IPRA[2]}" dev "${N}" 2>/dev/null || true
     fi
     if [ -n "${IPRA[3]:-${IPRA[2]}}" ]; then
-      sed -i "/nameserver ${IPRA[3]:-${IPRA[2]}}/d" /etc/resolv.conf
+      sed -i '/^nameserver /d' /etc/resolv.conf
       echo "nameserver ${IPRA[3]:-${IPRA[2]}}" >>/etc/resolv.conf
     fi
     sleep 1
   fi
-  [ "${ETH::3}" = "eth" ] && ethtool -s ${ETH} wol g 2>/dev/null || true
-  initConfigKey "${ETH}" "${MACR}" "${USER_CONFIG_FILE}"
+  [ "${N:0:3}" = "eth" ] && ethtool -s "${N}" wol g 2>/dev/null || true
+  initConfigKey "${N}" "${MACR}" "${USER_CONFIG_FILE}"
+  ETHN=$((ETHN + 1))
 done
-ETHN="$(echo ${ETHX} | wc -w)"
-writeConfigKey "device.nic" "${ETHN}" "${USER_CONFIG_FILE}"
+
 # No network devices
 echo
-[ ${ETHN} -le 0 ] && die "No NIC found! - Loader does not work without Network connection."
+[ "${ETHN}" = "0" ] && die "No NIC found! - Loader does not work without Network connection."
 
-# Get the VID/PID if we are in USB
-VID="0x46f4"
-PID="0x0001"
-
-BUSLIST="usb sata scsi nvme mmc xen"
-if [ "${BUS}" == "usb" ]; then
-  VID="0x$(udevadm info --query property --name "${LOADER_DISK}" | grep ID_VENDOR_ID | cut -d= -f2)"
-  PID="0x$(udevadm info --query property --name "${LOADER_DISK}" | grep ID_MODEL_ID | cut -d= -f2)"
-elif ! echo "${BUSLIST}" | grep -wq "${BUS}"; then
-  die "Loader Disk (${BUS}) is not USB or SATA/SCSI/NVME/eMMC"
+# Bus Check
+BUSLIST="usb sata sas scsi nvme mmc ide virtio vmbus xen docker"
+if [ "${BUS}" = "usb" ]; then
+  VID="0x$(udevadm info --query property --name "${LOADER_DISK}" 2>/dev/null | grep "ID_VENDOR_ID" | cut -d= -f2)"
+  PID="0x$(udevadm info --query property --name "${LOADER_DISK}" 2>/dev/null | grep "ID_MODEL_ID" | cut -d= -f2)"
+  [ "${VID}" = "0x" ] || [ "${PID}" = "0x" ] && die "The loader disk does not support the current USB Portable Hard Disk."
+elif [ "${BUS}" = "docker" ]; then
+  TYPE="PC"
+elif ! (echo "${BUSLIST}" | grep -wq "${BUS}"); then
+  die "$(printf "The loader disk does not support the current %s, only %s are supported." "${BUS}" "${BUSLIST// /\/}")"
 fi
+
+# Save variables to user config file
+writeConfigKey "vid" "${VID:-"0x46f4"}" "${USER_CONFIG_FILE}"
+writeConfigKey "pid" "${PID:-"0x0001"}" "${USER_CONFIG_FILE}"
 
 # Inform user and check bus
 echo -e "Loader Disk: \033[1;34m${LOADER_DISK}\033[0m"
 echo -e "Loader Disk Type: \033[1;34m${BUS}\033[0m"
-
-# Save variables to user config file
-writeConfigKey "vid" ${VID} "${USER_CONFIG_FILE}"
-writeConfigKey "pid" ${PID} "${USER_CONFIG_FILE}"
-
-# Load keymap name
-LAYOUT="$(readConfigKey "layout" "${USER_CONFIG_FILE}")"
-KEYMAP="$(readConfigKey "keymap" "${USER_CONFIG_FILE}")"
-
-# Loads a keymap if is valid
-if [ -n "${LAYOUT}" ] && [ -n "${KEYMAP}" ]; then
-  if [ -f "/usr/share/keymaps/i386/${LAYOUT}/${KEYMAP}.map.gz" ]; then
-    echo -e "Loading User Keymap: \033[1;34m${LAYOUT}/${KEYMAP}\033[0m"
-    zcat "/usr/share/keymaps/i386/${LAYOUT}/${KEYMAP}.map.gz" | loadkeys
-  fi
-fi
 echo
 
 # Decide if boot automatically
 BUILDDONE="$(readConfigKey "arc.builddone" "${USER_CONFIG_FILE}")"
-if grep -q "force_arc" /proc/cmdline; then
-  echo -e "\033[1;34mStarting Config Mode...\033[0m"
-elif grep -q "automated_arc" /proc/cmdline; then
-  echo -e "\033[1;34mStarting automated Build Mode...\033[0m"
-elif grep -q "update_arc" /proc/cmdline; then
-  echo -e "\033[1;34mStarting Update Mode...\033[0m"
-elif [ "${BUILDDONE}" == "true" ]; then
-  echo -e "\033[1;34mStarting DSM Mode...\033[0m"
-  bootDSM
-  exit 0
-else
-  echo -e "\033[1;34mStarting Config Mode...\033[0m"
-fi
+
+case "${ARC_MODE}" in
+  config)
+    echo -e "\033[1;34mStarting Config Mode...\033[0m"
+    ;;
+  automated)
+    echo -e "\033[1;34mStarting automated Build Mode...\033[0m"
+    ;;
+  update)
+    echo -e "\033[1;34mStarting Update Mode...\033[0m"
+    ;;
+  dsm|reinstall|recovery)
+    if [ "${BUILDDONE}" = "true" ] && [ -f "${MOD_ZIMAGE_FILE}" ] && [ -f "${MOD_RDGZ_FILE}" ]; then
+      echo -e "\033[1;34mStarting DSM Mode...\033[0m"
+      boot.sh
+      exit 0
+    else
+      [ "${BUILDDONE}" != "true" ] && echo -e "\033[1;31mBuild not completed.\033[0m"
+      [ ! -f "${MOD_ZIMAGE_FILE}" ] && echo -e "\033[1;31mMissing patched zImage: ${MOD_ZIMAGE_FILE}\033[0m"
+      [ ! -f "${MOD_RDGZ_FILE}" ] && echo -e "\033[1;31mMissing patched ramdisk: ${MOD_RDGZ_FILE}\033[0m"
+      echo -e "\033[1;34mRebooting to Config Mode to complete build...\033[0m"
+      sleep 5
+      rebootTo "config" || die "Reboot to Config Mode failed!"
+      exit 0
+    fi
+    ;;
+  *)
+    echo -e "\033[1;34mStarting Config Mode...\033[0m"
+    ;;
+esac
 echo
 
 BOOTIPWAIT="$(readConfigKey "bootipwait" "${USER_CONFIG_FILE}")"
 [ -z "${BOOTIPWAIT}" ] && BOOTIPWAIT=30
-echo -e "\033[1;34mDetected ${ETHN} NIC.\033[0m \033[1;37mWaiting for Connection:\033[0m"
-sleep 3
-for ETH in ${ETHX}; do
-  COUNT=0
-  DRIVER=$(ls -ld /sys/class/net/${ETH}/device/driver 2>/dev/null | awk -F '/' '{print $NF}')
-  while true; do
-    if ethtool ${ETH} 2>/dev/null | grep 'Link detected' | grep -q 'no'; then
-      echo -e "\r\033[1;37m${DRIVER}:\033[0m NOT CONNECTED"
-      break
-    fi
-    COUNT=$((${COUNT} + 1))
-    IP="$(getIP ${ETH})"
-    if [ -n "${IP}" ]; then
-      SPEED=$(ethtool ${ETH} 2>/dev/null | grep "Speed:" | awk '{print $2}')
-      if [[ "${IP}" =~ ^169\.254\..* ]]; then
-        echo -e "\r\033[1;37m${DRIVER} (${SPEED}):\033[0m LINK LOCAL (No DHCP server found.)"
-      else
-        echo -e "\r\033[1;37m${DRIVER} (${SPEED}):\033[0m Access \033[1;34mhttp://${IP}:7681\033[0m to connect to Arc via web interface."
-      fi
-      break
-    fi
-    if ! ip link show ${ETH} 2>/dev/null | grep -q 'UP'; then
-      echo -e "\r\033[1;37m${DRIVER}:\033[0m DOWN"
-      break
-    fi
-    if [ ${COUNT} -ge ${BOOTIPWAIT} ]; then
-      echo -e "\r\033[1;37m${DRIVER}:\033[0m TIMEOUT"
-      break
-    fi
-    sleep 1
-  done
-done
+echo -e "\033[1;34mNetwork (${ETHN} NIC)\033[0m"
+RESTARTED=0
+if [ ! -f "/.dockerenv" ]; then
+  [ ! -f /var/run/dhcpcd/pid ] && /etc/init.d/S41dhcpcd restart >/dev/null 2>&1 && RESTARTED=1
+fi
+# thttpd leaves its pidfile behind when it dies, so check the process, not the file
+if [ ! -f /var/run/thttpd.pid ] || ! kill -0 "$(cat /var/run/thttpd.pid 2>/dev/null)" 2>/dev/null; then
+  rm -f /var/run/thttpd.pid
+  /etc/init.d/S90thttpd restart >/dev/null 2>&1 && RESTARTED=1
+fi
+[ "${RESTARTED}" = "1" ] && sleep 5
+IPCON=""
+checkNIC
+echo
 
-# Inform user
-echo
-echo -e "Call \033[1;34marc.sh\033[0m to configure Arc"
-echo
-echo -e "User config is on \033[1;34m${USER_CONFIG_FILE}\033[0m"
-echo -e "Default SSH Root password is \033[1;34marc\033[0m"
-echo
+# Tell webterminal that the loader is ready
+touch "${HOME}/.initialized"
 
 mkdir -p "${ADDONS_PATH}"
 mkdir -p "${CUSTOM_PATH}"
 mkdir -p "${LKMS_PATH}"
-mkdir -p "${MODEL_CONFIG_PATH}"
+mkdir -p "${CONFIGS_PATH}"
 mkdir -p "${MODULES_PATH}"
 mkdir -p "${PATCH_PATH}"
 mkdir -p "${USER_UP_PATH}"
 
-# Load Arc Overlay
-echo -e "\033[1;34mLoading Arc Overlay...\033[0m"
+# Symlink *-7.3-* files to *-7.4-* in custom, modules and lkms
+#for DIR in "${MODULES_PATH}" "${CUSTOM_PATH}"; do
+#  while IFS= read -r -d '' SRC; do
+#    SRCB="$(basename "${SRC}")"
+#    DSTB="${SRCB/-7.3-/-7.4-}"
+#    DST="${DIR}/${DSTB}"
+#    [ "${DST}" != "${SRC}" ] && [ ! -e "${DST}" ] && ln -sf "${SRC}" "${DST}" || true
+#  done < <(find "${DIR}" -maxdepth 1 -type f -name '*-7.3-*' -print0)
+#done
 
-# Check memory and load Arc
-RAM=$(free -m | grep -i mem | awk '{print$2}')
-if [ ${RAM} -le 3500 ]; then
-  echo -e "\033[1;31mYou have less than 4GB of RAM, if errors occur in loader creation, please increase the amount of RAM.\033[0m\n"
-  echo -e "\033[1;31mUse arc.sh to proceed. Not recommended!\033[0m\n"
-else
- if grep -q "update_arc" /proc/cmdline; then
-    update.sh
-  else
-    arc.sh
+# Development Mode
+DEVELOPMENT_MODE="$(readConfigKey "arc.dev" "${USER_CONFIG_FILE}")"
+if [ "${DEVELOPMENT_MODE}" = "true" ]; then
+  echo -e "\033[1;34mDevelopment Mode is enabled.\033[0m"
+  curl -skL https://github.com/AuxXxilium/arc/archive/refs/heads/dev.zip -o /tmp/arc-dev.zip 2>/dev/null || true
+  unzip -q /tmp/arc-dev.zip -d /tmp 2>/dev/null || true
+  cp -rf /tmp/arc-dev/files/initrd/opt/arc /opt 2>/dev/null || true
+  rm -rf /tmp/arc-dev /tmp/arc-dev.zip
+fi
+
+# Notification System
+WEBHOOKNOTIFY="$(readConfigKey "arc.webhooknotify" "${USER_CONFIG_FILE}")"
+if [ "${WEBHOOKNOTIFY}" = "true" ] && [ ! -f "/.dockerenv" ]; then
+  WEBHOOKURL="$(readConfigKey "arc.webhookurl" "${USER_CONFIG_FILE}")"
+  sendWebhook "${WEBHOOKURL}" "${ARC_MODE} is running @ ${IPCON}" || true
+  echo -e "\033[1;34mWebhook Notification enabled.\033[0m"
+  echo
+fi
+DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
+if [ "${DISCORDNOTIFY}" = "true" ] && [ ! -f "/.dockerenv" ]; then
+  DISCORDUSER="$(readConfigKey "arc.userid" "${USER_CONFIG_FILE}")"
+  if [ -n "${DISCORDUSER}" ]; then
+    sendDiscord "${DISCORDUSER}" "${ARC_MODE} is running @ ${IPCON}" || true
+    echo -e "\033[1;34mDiscord Notification enabled.\033[0m"
+    echo
   fi
 fi
 
-exit 0
+# Load Arc Overlay
+echo -e "\033[1;34mLoading Arc Overlay...\033[0m"
+echo
+echo -e "Use \033[1;34mDisplay Output\033[0m or \033[1;34mhttp://${IPCON}:${HTTPPORT:-7080}\033[0m to configure Loader."
+echo
+
+# Check memory and load Arc
+RAM=$(awk '/MemTotal:/ {printf "%.0f", $2 / 1024}' /proc/meminfo 2>/dev/null)
+if [ "${RAM:-0}" -le 3500 ]; then
+  echo -e "\033[1;31mYou have less than 4GB of RAM, if errors occur in loader creation, please increase the amount of RAM.\033[0m"
+  sleep 5
+fi
+if [ "${RAM:-0}" -le 7000 ]; then
+  mount -o remount,size=${RAM}M /tmp 2>/dev/null || true
+fi
+arc.sh
